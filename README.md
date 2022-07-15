@@ -7,7 +7,7 @@ This is the official Pytorch code for the paper "Semantic Novelty Detection via 
 
 We propose a novel *relational reasoning*-based representation learning approach, tailored for
 semantic novelty detection, called **ReSeND** (Relational Semantic Novelty Detection). 
-With respect to standard self supervised representation learning methods ReSeND does not focus on
+With respect to standard supervised representation learning methods ReSeND does not focus on
 learning *known* classes, instead it learns to assign a semantic similarity score to any pair of
 samples. 
 
@@ -16,7 +16,7 @@ enough to compute normality scores for test samples.
 
 ![](media/representation_learning.png)
 
-ReSeND exploits a simple transformer-based relational module
+ReSeND exploits a simple transformer-based relational module.
 
 ![](media/architecture.png)
 
@@ -60,6 +60,10 @@ python -m torch.distributed.launch --n_proc_per_node=16 train.py
 Multi node training is also supported.
 If you plan on using a lower number of GPUs you should modify the learning rate and the number of
 iterations accordingly using launch params `--learning_rate` and `--iterations`.
+
+We provide a pretrained model ready to be used for eval [here](https://drive.google.com/file/d/1rLgFPC27dCulOmlwpB4WXhIhGAmbjzQO/view?usp=sharing).
+Once downloaded the zip extract it in `outputs/ImageNet_resnet18_rel_transformer/`.
+
 
 ## Eval
 
