@@ -55,7 +55,7 @@ def get_args():
 
     parser.add_argument("--image_size", type=int, default=224, help="Image size")
     parser.add_argument("--batch_size", type=int, default=256, help="Batch size")
-    parser.add_argument("--learning_rate", type=float, default=0.4, help="Learning rate")
+    parser.add_argument("--learning_rate", type=float, default=0.008, help="Learning rate")
     parser.add_argument("--iterations", type=int, default=13000, help="Number of iterations")
     parser.add_argument("--step_after", type=int, default=13000, help="Step after")
     parser.add_argument("--warmup", type=int, default=500, help="Number of warmup iters")
