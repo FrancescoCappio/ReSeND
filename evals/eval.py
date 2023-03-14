@@ -171,3 +171,72 @@ def do_test_target_with_prototypes(args, models, prototypes, target_loader, know
         print("FPR95 %f" % (fpr_auroc))
 
         return auroc
+
+@torch.no_grad()
+def do_knn_distance_eval(args, models, source_loader, target_loader, known_classes=None):
+    if known_classes is None:
+        known_classes = args.known_classes
+
+    # we need to compare each test sample with all training samples
+    feature_extractor = models["feature_extractor"]
+    cls_rel = models["cls_rel"]
+
+    device = args.device
+
+    assert target_loader.batch_size == 1, "Target loader batch size should be 1"
+
+    predictions = torch.zeros((len(target_loader.dataset), len(source_loader.dataset)))
+    gt_labels = torch.zeros((len(target_loader.dataset)), dtype=torch.long)
+
+    for test_idx, test_batch in enumerate(tqdm(target_loader)):
+        images, labels, indices = test_batch 
+        gt_labels[indices] = labels
+
+        images = images.to(device)
+        test_feats = feature_extractor.forward(images)
+
+        for train_batch in source_loader:
+            train_images, train_labels, train_ids = train_batch 
+
+            train_images = train_images.to(device) 
+            train_feats = feature_extractor.forward(train_images)
+
+            aggregated_batch = torch.cat((test_feats.expand(train_feats.shape[0], -1), train_feats), 1)
+            out = - cls_rel(aggregated_batch)
+            predictions[indices, train_ids] = out.squeeze().cpu()
+
+    if args.distributed:
+        all_labels = all_gather(gt_labels)
+        all_preds = all_gather(predictions)
+
+        predictions_accum = all_preds[0]
+        labels_accum = all_labels[0]
+
+        for idx in range(1,len(all_labels)):
+            predictions_accum += all_preds[idx]
+            labels_accum += all_labels[idx]
+
+        predictions = predictions_accum
+        gt_labels = labels_accum
+
+    K = args.NNK
+    values, indices = predictions.topk(k=K, dim=1)
+    normality_scores = values.mean(dim=1).numpy()
+
+    # compute metrics 
+    ood_labels = np.zeros_like(normality_scores)
+    ood_labels[gt_labels < known_classes] = 1
+
+    scores = np.array(normality_scores)
+    auroc = roc_auc_score(ood_labels, scores)
+    
+    recall_level = 0.95
+    fpr_auroc = fpr_and_fdr_at_recall(ood_labels, scores, recall_level)
+
+    print("Auroc %f" % (auroc))
+    print("FPR95 %f" % (fpr_auroc))
+
+    return auroc
+
+
+
