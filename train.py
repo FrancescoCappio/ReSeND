@@ -33,7 +33,7 @@ def get_args():
     parser.add_argument("--dataset", default="ImageNet", help="Dataset name",
                         choices=["ImageNet", "OfficeHome_DG", "PACS_DG", "MultiDatasets_DG", 'DTD', 
                                  'DomainNet_IN_OUT','DomainNet_Painting','OfficeHome_SS_DG','PACS_SS_DG','DomainNet_Sketch',
-                                 "imagenet_ood", "imagenet_ood_small", "Places"])
+                                 "imagenet_ood", "imagenet_ood_small", "Places", "DomainNet_DG"])
     parser.add_argument("--source",
                         help="Source_OH: no_Product, no_Art, no_Clipart, no_RealWorld | Source_PACS: no_ArtPainting, no_Cartoon, no_Photo, no_Sketch | Source_MultiDatasets: Sources")
     parser.add_argument("--target",
@@ -124,7 +124,7 @@ def get_args():
     elif dataset == "DTD":
         args.known_classes = 23
         args.tot_classes = 47
-    elif dataset == "DomainNet_IN_OUT" or dataset == 'DomainNet_Painting' or dataset == 'DomainNet_Sketch' or dataset == "Places":
+    elif "DomainNet" in dataset or dataset == "Places":
         args.known_classes = 25
         args.tot_classes = 50
     elif dataset == "imagenet_ood":
@@ -394,6 +394,7 @@ class Trainer:
         feats_prototypes = torch.tensor(feats_prototypes)
 
         per_class_significant_feats = []
+         
 
         if not self.args.distributed or self.args.global_rank == 0:
         

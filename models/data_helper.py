@@ -166,7 +166,7 @@ def get_val_dataloader(args, eval_dataset=None):
     target = args.target
     source = args.source
 
-    if "DomainNet" in dataset or "DTD" in dataset or dataset.startswith("imagenet_ood"):
+    if dataset in ["DomainNet_IN_OUT", "DomainNet_Painting", "DomainNet_Sketch", "DTD"] or dataset.startswith("imagenet_ood"):
         source = "in_distribution"
         target = "out_distribution"
     elif dataset == 'MultiDatasets_DG':
