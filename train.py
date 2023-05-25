@@ -587,13 +587,13 @@ def main():
         output_txt = "out.txt"
 
     # print on both log file and stdout
-    #orig_stdout = sys.stdout
-    #orig_stderr = sys.stderr
-    #if not args.distributed or args.global_rank == 0:
-    #    f = open(folder_name + '/' + output_txt, 'a')
-    #    sys.stdout = LogUnbuffered(args, orig_stdout, f)
-    #    f1 = open(folder_name + '/stderr.txt', 'a')
-    #    sys.stderr = LogUnbuffered(args, orig_stderr, f1)
+    orig_stdout = sys.stdout
+    orig_stderr = sys.stderr
+    if not args.distributed or args.global_rank == 0:
+        f = open(folder_name + '/' + output_txt, 'a')
+        sys.stdout = LogUnbuffered(args, orig_stdout, f)
+        f1 = open(folder_name + '/stderr.txt', 'a')
+        sys.stderr = LogUnbuffered(args, orig_stderr, f1)
 
     if args.distributed:
         print(f"Total number of processes: {args.n_gpus}")
