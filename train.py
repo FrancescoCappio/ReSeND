@@ -11,7 +11,6 @@ import numpy as np
 import os
 import sys
 import ast
-import copy
 import time
 import datetime
 import math
@@ -22,9 +21,9 @@ from models.data_helper import get_train_dataloader, get_val_dataloader
 from utils.ckpt_utils import load_ckpt, save_ckpt, check_resume, resume
 from utils.log_utils import LogUnbuffered, count_parameters
 from utils.dist_utils import all_gather
-from evals.eval import do_test_target_with_prototypes
+from evals.eval import do_test_target_with_prototypes, do_knn_distance_eval, do_test_target_with_prototypes_new
+from utils.utils import get_coreset_idx
 
-import random
 
 def get_args():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -32,7 +31,9 @@ def get_args():
     parser.add_argument("--local_rank", type=int)  # automatically passed by torch.distributed.launch
 
     parser.add_argument("--dataset", default="ImageNet", help="Dataset name",
-                        choices=["ImageNet", "OfficeHome_DG", "PACS_DG", "MultiDatasets_DG", 'DTD', 'DomainNet_IN_OUT','DomainNet_Painting','OfficeHome_SS_DG','PACS_SS_DG','DomainNet_Sketch'])
+                        choices=["ImageNet", "OfficeHome_DG", "PACS_DG", "MultiDatasets_DG", 'DTD', 
+                                 'DomainNet_IN_OUT','DomainNet_Painting','OfficeHome_SS_DG','PACS_SS_DG','DomainNet_Sketch',
+                                 "imagenet_ood", "imagenet_ood_small", "Places", "DomainNet_DG"])
     parser.add_argument("--source",
                         help="Source_OH: no_Product, no_Art, no_Clipart, no_RealWorld | Source_PACS: no_ArtPainting, no_Cartoon, no_Photo, no_Sketch | Source_MultiDatasets: Sources")
     parser.add_argument("--target",
@@ -71,6 +72,9 @@ def get_args():
     parser.add_argument("--transf_n_heads", type=int, default=12,
                         help="Number of heads in self attention modules for the relational transformer")
 
+    # run params
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for data splitting")
+    parser.add_argument("--few_shot", type=int, default=-1, help="Number of training samples for each class, -1 means use whole dataset")
     # save model
     parser.add_argument("--suffix", type=str, help="Suffix for output folder name", default="")
 
@@ -87,6 +91,10 @@ def get_args():
     # regression loss params    
     parser.add_argument("--sigmoid_compression", type=float, default=10.0, help="Horizontal compression of the translated sigmoid for regression loss")
     parser.add_argument("--sigmoid_expansion", type=float, default=2.0, help="Vertical expansion of the translated sigmoid for regression loss")
+
+    parser.add_argument("--most_significant_prototypes", action="store_true", help="Select NNK most significant samples for each class as prototypes")
+    parser.add_argument("--knn_distance_evaluator", action="store_true", help="Use similarity with nearest K train samples as normality score")
+    parser.add_argument("--NNK", default=1, type=int, help="K for knn distance evaluator")
 
     args = parser.parse_args()
 
@@ -116,9 +124,17 @@ def get_args():
     elif dataset == "DTD":
         args.known_classes = 23
         args.tot_classes = 47
-    elif dataset == "DomainNet_IN_OUT" or dataset == 'DomainNet_Painting' or dataset == 'DomainNet_Sketch' :
+    elif "DomainNet" in dataset or dataset == "Places":
         args.known_classes = 25
         args.tot_classes = 50
+    elif dataset == "imagenet_ood":
+        args.known_classes = 500
+        args.tot_classes = 1000
+    elif dataset == "imagenet_ood_small":
+        args.known_classes = 25
+        args.tot_classes = 50
+    else:
+        raise NotImplementedError(f"Unknown dataset {dataset}")
 
     if os.path.isdir("/scratch/ImageNet"):
         args.imagenet_path_dataset = os.path.expanduser('/scratch/')
@@ -305,15 +321,25 @@ class Trainer:
 
     @torch.no_grad()
     def do_final_eval(self, known_classes=None):
-        if known_classes is None:
-            known_classes = self.args.known_classes
-        self.to_eval()
-        prototypes = self.compute_source_prototypes(self.source_loader_test, known_classes=known_classes, log=False)
-        print('Prototypes evaluation')
-        auroc = do_test_target_with_prototypes(self.args, self.models, prototypes, self.target_loader, known_classes=known_classes)
+
+        if self.args.most_significant_prototypes:
+            prototypes = self.compute_most_significant_prototypes(self.source_loader_test, n_proto=self.args.NNK, known_classes=known_classes, log=False)
+            
+            auroc = do_test_target_with_prototypes_new(self.args, self.models, prototypes, self.target_loader, known_classes=known_classes)
+
+        elif self.args.knn_distance_evaluator:
+            auroc = do_knn_distance_eval(self.args, self.models, self.source_loader_test, self.target_loader, known_classes=known_classes)
+        else:
+
+            if known_classes is None:
+                known_classes = self.args.known_classes
+            self.to_eval()
+            prototypes = self.compute_source_prototypes(self.source_loader_test, known_classes=known_classes, log=False)
+            print('Prototypes evaluation')
+            auroc = do_test_target_with_prototypes(self.args, self.models, prototypes, self.target_loader, known_classes=known_classes)
         return auroc
 
-    def compute_source_prototypes(self, sources_loader, known_classes=None, log=False):
+    def compute_source_prototypes(self, sources_loader, known_classes=None, log=False, return_feats = False):
         if known_classes is None:
             known_classes = self.args.known_classes
         # prepare structures to hold prototypes
@@ -357,7 +383,45 @@ class Trainer:
             prototype = feats.mean(0)
             prototypes[category] = prototype
 
+        if return_feats: 
+            return prototypes, source_features, source_labels
+
         return prototypes
+
+    def compute_most_significant_prototypes(self, sources_loader, n_proto=5, known_classes=None, log=False):
+        # the most significant prototype for each class is the nearest sample to the feats mean
+        feats_prototypes, src_feats, src_labels = self.compute_source_prototypes(sources_loader, known_classes=known_classes, log=log, return_feats=True)
+        feats_prototypes = torch.tensor(feats_prototypes)
+
+        per_class_significant_feats = []
+         
+
+        if not self.args.distributed or self.args.global_rank == 0:
+        
+            for idx in range(len(feats_prototypes)):
+                proto = feats_prototypes[idx]
+                class_mask = src_labels == idx
+                cls_feats = src_feats[class_mask]
+
+                nearest_idx = torch.norm(cls_feats - proto, dim=1).argmin()
+
+                # put the nearest sample in the first position
+                cls_feats[[0,nearest_idx],:] = cls_feats[[nearest_idx,0],:]
+
+                # apply coreset
+                most_significant_ids = get_coreset_idx(cls_feats, n=n_proto)
+                per_class_significant_feats.append(cls_feats[most_significant_ids])
+
+        if self.args.distributed:
+
+            all_sign_feats = all_gather(per_class_significant_feats)
+
+            for feat_list in all_sign_feats:
+                if len(feat_list) > 0: 
+                    per_class_significant_feats = feat_list
+                    break
+
+        return per_class_significant_feats
 
     def do_training(self):
         # prepare eval data
@@ -530,7 +594,6 @@ def main():
         sys.stdout = LogUnbuffered(args, orig_stdout, f)
         f1 = open(folder_name + '/stderr.txt', 'a')
         sys.stderr = LogUnbuffered(args, orig_stderr, f1)
-
 
     if args.distributed:
         print(f"Total number of processes: {args.n_gpus}")

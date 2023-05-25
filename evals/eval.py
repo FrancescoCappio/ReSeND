@@ -171,3 +171,198 @@ def do_test_target_with_prototypes(args, models, prototypes, target_loader, know
         print("FPR95 %f" % (fpr_auroc))
 
         return auroc
+
+@torch.no_grad()
+def do_test_target_with_prototypes_new(args, models, prototypes, target_loader, known_classes=None):
+    if known_classes is None:
+        known_classes = args.known_classes
+
+    device = args.device
+    feature_extractor = models["feature_extractor"]
+    cls_rel = models["cls_rel"]
+
+    assert known_classes == len(prototypes), f"Incorrect number of prototypes lists, known_classes = {known_classes}, len_prototypes={len(prototypes)}"
+    # we assume we can have more than one prototype for each source class 
+    # prototypes is thus a list with len == n_source_classes
+    # for each test sample the probability of belonging to known class i
+    # is given by its distance with the nearest prototype of class i 
+
+    # we first stack prototypes and respective labels 
+    all_labels = [idx*torch.ones(len(prototypes[idx])) for idx in range(len(prototypes))]
+
+    all_labels = torch.cat(all_labels)
+    prototypes = torch.cat(prototypes).to(device)
+
+    assert target_loader.batch_size == 1, "Target loader batch size should be 1"
+
+    predictions = torch.zeros((len(target_loader.dataset), len(prototypes)))
+    gt_labels = torch.zeros((len(target_loader.dataset)), dtype=torch.long)
+
+    batch_size = args.batch_size
+    nchunks = int(np.ceil(prototypes.shape[0]/batch_size))
+
+    for test_idx, test_batch in enumerate(tqdm(target_loader)):
+        images, labels, indices = test_batch 
+        gt_labels[indices] = labels
+
+        images = images.to(device)
+        test_feats = feature_extractor.forward(images)
+
+        chunks = prototypes.chunk(nchunks, dim=0)
+        pos = 0
+
+        for idx in range(nchunks): 
+            chunk_protos = chunks[idx]
+            chunk_size = len(chunk_protos)
+
+            aggregated_batch = torch.cat((test_feats.expand(chunk_size, -1), chunk_protos), 1)
+            out = - cls_rel(aggregated_batch)
+            predictions[indices, pos:pos+chunk_size] = out.squeeze().cpu()
+            pos += chunk_size
+
+    # split predictions by class labels, get closed set predictions
+    cs_predictions = torch.zeros((len(predictions), known_classes))
+    for lbl in range(known_classes):
+        mask = all_labels == lbl
+        class_predictions, _ = predictions[:,mask].max(dim=1)
+        cs_predictions[:,lbl] = class_predictions
+
+    if args.distributed:
+        all_labels = all_gather(gt_labels)
+        all_preds = all_gather(cs_predictions)
+
+        predictions_accum = all_preds[0]
+        labels_accum = all_labels[0]
+
+        for idx in range(1,len(all_labels)):
+            predictions_accum += all_preds[idx]
+            labels_accum += all_labels[idx]
+
+        cs_predictions = predictions_accum
+        gt_labels = labels_accum
+
+    MLS_normality_scores, cls_preds = cs_predictions.max(dim=1)
+
+    MSP_normality_scores, _ = torch.nn.functional.softmax(cs_predictions, dim=1).max(dim=1)
+    MLS_normality_scores = MLS_normality_scores.numpy()
+    MSP_normality_scores = MSP_normality_scores.numpy()
+
+    # compute metrics 
+    ood_labels = np.zeros_like(MLS_normality_scores)
+    ood_labels[gt_labels < known_classes] = 1
+
+    scores = MLS_normality_scores
+    auroc = roc_auc_score(ood_labels, scores)
+    
+    recall_level = 0.95
+    fpr_auroc = fpr_and_fdr_at_recall(ood_labels, scores, recall_level)
+
+    print("Auroc %f" % (auroc))
+    print("FPR95 %f" % (fpr_auroc))
+
+    scores = MSP_normality_scores
+    auroc = roc_auc_score(ood_labels, scores)
+    
+    recall_level = 0.95
+    fpr_auroc = fpr_and_fdr_at_recall(ood_labels, scores, recall_level)
+
+    print("MSP Auroc %f" % (auroc))
+    print("MSP FPR95 %f" % (fpr_auroc))
+
+    return auroc
+
+
+
+@torch.no_grad()
+def do_knn_distance_eval(args, models, source_loader, target_loader, known_classes=None):
+    if known_classes is None:
+        known_classes = args.known_classes
+
+    # we need to compare each test sample with all training samples
+    feature_extractor = models["feature_extractor"]
+    cls_rel = models["cls_rel"]
+
+    device = args.device
+
+    assert target_loader.batch_size == 1, "Target loader batch size should be 1"
+
+    # first we extract features for the whole source set. This allows to optimize the next step 
+    # as we extract source features only one time
+    feats_size = feature_extractor(source_loader.dataset[0][0].to(device).unsqueeze(0)).shape[1]
+    source_feats = torch.zeros((len(source_loader.dataset), feats_size), device=device)
+
+    for train_batch in source_loader:
+        train_images, train_labels, train_ids = train_batch
+        train_images = train_images.to(device)
+        train_feats = feature_extractor.forward(train_images)
+        source_feats[train_ids] = train_feats
+
+    if args.distributed:
+        all_feats = all_gather(source_feats)
+
+        feats_accum = all_feats[0].to(device)
+
+        for idx in range(1, len(all_feats)):
+            feats_accum += all_feats[idx].to(device)
+        source_feats = feats_accum
+
+    predictions = torch.zeros((len(target_loader.dataset), len(source_loader.dataset)))
+    gt_labels = torch.zeros((len(target_loader.dataset)), dtype=torch.long)
+
+    batch_size = args.batch_size
+    nchunks = int(np.ceil(source_feats.shape[0]/batch_size))
+
+    for test_idx, test_batch in enumerate(tqdm(target_loader)):
+        images, labels, indices = test_batch 
+        gt_labels[indices] = labels
+
+        images = images.to(device)
+        test_feats = feature_extractor.forward(images)
+
+        chunks = source_feats.chunk(nchunks, dim=0)
+        pos = 0
+
+        for idx in range(nchunks): 
+            chunk_protos = chunks[idx]
+            chunk_size = len(chunk_protos)
+
+            aggregated_batch = torch.cat((test_feats.expand(chunk_size, -1), chunk_protos), 1)
+            out = - cls_rel(aggregated_batch)
+            predictions[indices, pos:pos+chunk_size] = out.squeeze().cpu()
+            pos += chunk_size
+
+    if args.distributed:
+        all_labels = all_gather(gt_labels)
+        all_preds = all_gather(predictions)
+
+        predictions_accum = all_preds[0]
+        labels_accum = all_labels[0]
+
+        for idx in range(1,len(all_labels)):
+            predictions_accum += all_preds[idx]
+            labels_accum += all_labels[idx]
+
+        predictions = predictions_accum
+        gt_labels = labels_accum
+
+    K = args.NNK
+    values, indices = predictions.topk(k=K, dim=1)
+    normality_scores = values.mean(dim=1).numpy()
+
+    # compute metrics 
+    ood_labels = np.zeros_like(normality_scores)
+    ood_labels[gt_labels < known_classes] = 1
+
+    scores = np.array(normality_scores)
+    auroc = roc_auc_score(ood_labels, scores)
+    
+    recall_level = 0.95
+    fpr_auroc = fpr_and_fdr_at_recall(ood_labels, scores, recall_level)
+
+    print("Auroc %f" % (auroc))
+    print("FPR95 %f" % (fpr_auroc))
+
+    return auroc
+
+
+

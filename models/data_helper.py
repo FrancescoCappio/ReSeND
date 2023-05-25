@@ -9,8 +9,28 @@ from random import sample
 from models.create_pairs import create_pairs_source_v2
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
+import numpy as np
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
+
+def few_shot_subsample(names, labels, n_shots=5, seed=42):
+    # randomly select n_shots samples for each class 
+    np_labels = np.array(labels)
+    np_names = np.array(names)
+
+    indices = np.arange(len(labels))
+    known_classes = set(labels)
+
+    random_generator = np.random.default_rng(seed=seed)
+    new_names = []
+    new_labels = []
+    for lbl in known_classes:
+        mask = np_labels == lbl
+        selected_ids = random_generator.choice(indices[mask],n_shots)
+        new_names.extend(np_names[selected_ids].tolist())
+        new_labels.extend(n_shots*[lbl])
+
+    return new_names, new_labels
 
 def _dataset_info(txt_labels):
     with open(txt_labels, 'r') as f:
@@ -146,7 +166,7 @@ def get_val_dataloader(args, eval_dataset=None):
     target = args.target
     source = args.source
 
-    if dataset == "DomainNet_IN_OUT":
+    if dataset in ["DomainNet_IN_OUT", "DomainNet_Painting", "DomainNet_Sketch", "DTD"] or dataset.startswith("imagenet_ood"):
         source = "in_distribution"
         target = "out_distribution"
     elif dataset == 'MultiDatasets_DG':
@@ -157,6 +177,10 @@ def get_val_dataloader(args, eval_dataset=None):
 
     names_target,labels_target = _dataset_info_standard(dataset_tgt_path)
     names_sources, labels_sources = _dataset_info_standard(dataset_srcs_path)
+
+    # apply few shot subsampling if necessary
+    if args.few_shot > 0: 
+        names_sources, labels_sources = few_shot_subsample(names_sources, labels_sources, n_shots=args.few_shot, seed=args.seed) 
 
     img_tr = get_val_transformer(args)
     path_dataset = args.path_dataset
@@ -169,11 +193,12 @@ def get_val_dataloader(args, eval_dataset=None):
 
     if args.distributed:
         target_sampler = DistributedSampler(dataset=target_dataset, shuffle=False)
-        target_loader = torch.utils.data.DataLoader(target_dataset, batch_size=1, num_workers=0, pin_memory=True, sampler=target_sampler, drop_last=False)
+        target_loader = torch.utils.data.DataLoader(target_dataset, batch_size=1, num_workers=4, pin_memory=True, sampler=target_sampler, drop_last=False)
         sources_sampler = DistributedSampler(dataset=sources_dataset, shuffle=False)
-        sources_loader = torch.utils.data.DataLoader(sources_dataset, batch_size=args.batch_size, num_workers=4, pin_memory=True, sampler=sources_sampler, drop_last=False)
+        sources_loader = torch.utils.data.DataLoader(sources_dataset, batch_size=args.batch_size, num_workers=4, sampler=sources_sampler, pin_memory=True, drop_last=False)
+
     else:
-        target_loader = torch.utils.data.DataLoader(target_dataset, batch_size=1, shuffle=False, num_workers=0, pin_memory=True, drop_last=False) 
+        target_loader = torch.utils.data.DataLoader(target_dataset, batch_size=1, shuffle=False, num_workers=4, pin_memory=True, drop_last=False) 
         sources_loader = torch.utils.data.DataLoader(sources_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True, drop_last=False)
 
     return target_loader, sources_loader
