@@ -81,6 +81,10 @@ For the parameters you should use:
  - `ArtPainting|Cartoon|Sketch|Photo` as `<target_set>` for PACS and 
    `Art|Clipart|Product|RealWorld` for OfficeHome.
 
+## Competitors 
+
+If you are interested in replicating the results of the ReSeND's competitors included in the paper's tables you can refer to [this repo](https://github.com/FrancescoCappio/OODDetectionBench/tree/Resend_competitors).
+
 ## Citation 
 
 If you find our code useful, please cite our paper: 
