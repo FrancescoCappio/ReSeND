@@ -1,7 +1,7 @@
 import argparse
+from os import environ
 
 import torch
-import torch.distributed as dist
 from torchlars import LARS
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch import nn
@@ -522,12 +522,17 @@ def main():
     args = get_args()
     ### Set torch device ###
     if torch.cuda.is_available():
-        if not hasattr(args, 'local_rank') or args.local_rank is None:
+        if hasattr(args, 'local_rank') and not args.local_rank is None:
+            assert False, "Please use torchrun for distributed execution"
+
+        if "LOCAL_RANK" in environ:
+            args.local_rank = int(environ["LOCAL_RANK"])
+            args.distributed = True
+            torch.cuda.set_device(args.local_rank)
+        else:
             args.distributed = False
             args.n_gpus = 1
-        else:
-            torch.cuda.set_device(args.local_rank)
-            args.distributed = True
+
         device = torch.device("cuda")
     else:
         print("WARNING. Running in CPU mode")
